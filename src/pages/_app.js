@@ -11,9 +11,11 @@ import { store } from '../store'
 import { createTheme } from '../theme'
 import { createEmotionCache } from '../utils/create-emotion-cache'
 import '../libs/nprogress'
+import 'driver.js/dist/driver.css'
+import '../styles/tutorial-overrides.css'
 import { PrivateRoute } from '../components/PrivateRoute'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { useMediaPredicate } from 'react-media-hook'
+import { useSystemPrefersDark } from '../hooks/use-system-prefers-dark'
 import Error500 from './500'
 import { ErrorBoundary } from 'react-error-boundary'
 import { LocalizationProvider } from '@mui/x-date-pickers/LocalizationProvider'
@@ -52,13 +54,15 @@ import {
   Gavel,
   ClearAll as ClearAllIcon,
 } from '@mui/icons-material'
+import { School as TutorialIcon } from '@mui/icons-material'
 import { SvgIcon } from '@mui/material'
-import discordIcon from '../../public/discord-mark-blue.svg'
 import React, { useEffect, useState, useRef } from 'react'
 import { usePathname } from 'next/navigation'
 import { useRouter } from 'next/router'
 import { persistQueryClient } from '@tanstack/react-query-persist-client'
 import { createSyncStoragePersister } from '@tanstack/query-sync-storage-persister'
+import { TutorialProvider } from '../contexts/tutorial-context'
+import CippTutorialDialog from '../components/CippComponents/CippTutorialDialog'
 
 const ReactQueryDevtoolsProduction = React.lazy(() =>
   import('@tanstack/react-query-devtools/build/modern/production.js').then((d) => ({
@@ -69,16 +73,32 @@ TimeAgo.addDefaultLocale(en)
 
 const queryClient = new QueryClient()
 const clientSideEmotionCache = createEmotionCache()
+
 const App = (props) => {
   const { Component, emotionCache = clientSideEmotionCache, pageProps } = props
   const getLayout = Component.getLayout ?? ((page) => page)
-  const preferredTheme = useMediaPredicate('(prefers-color-scheme: dark)') ? 'dark' : 'light'
+  const preferredTheme = useSystemPrefersDark() ? 'dark' : 'light'
+
+  // The _document.js init style painted the page dark and hid the stale light
+  // prerender for dark-mode users. By the time passive effects run, the themed
+  // UI is committed and painted (useSystemPrefersDark flushes pre-paint), so
+  // the guard style has done its job.
+  useEffect(() => {
+    document.getElementById('cipp-color-init')?.remove()
+  }, [])
+
   const pathname = usePathname()
   const route = useRouter()
   const [dateLocale, setDateLocale] = useState(enUS)
+  const [tutorialDialogOpen, setTutorialDialogOpen] = useState(false)
 
   useEffect(() => {
     if (typeof window === 'undefined') return
+
+    // Register minimal service worker for Chrome installability
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {})
+    }
 
     const language = navigator.language || navigator.userLanguage || 'en-US'
     const baseLang = language.split('-')[0]
@@ -137,7 +157,8 @@ const App = (props) => {
     setDateLocale(resolvedLocale)
   }, [])
 
-  const excludeQueryKeys = ['authmeswa', 'alertsDashboard']
+  // authmecipp not persisted, stale clientPrincipal:null flashes 401 on post-login reload
+  const excludeQueryKeys = ['authmeswa', 'authmecipp', 'alertsDashboard']
 
   // 👇 Persist TanStack Query cache to localStorage
   useEffect(() => {
@@ -151,7 +172,7 @@ const App = (props) => {
         persister: localStoragePersister,
         maxAge: 1000 * 60 * 60 * 24, // 24 hours
         staleTime: 1000 * 60 * 5, // optional: 5 minutes
-        buster: 'v1',
+        buster: 'v2',
         dehydrateOptions: {
           shouldDehydrateQuery: (query) => {
             const queryIsReadyForPersistence = query.state.status === 'success'
@@ -209,30 +230,24 @@ const App = (props) => {
       id: 'bug-report',
       icon: <BugReportIcon />,
       name: 'Report Bug',
-      href: 'https://github.com/KelvinTegelaar/CIPP/issues/new?template=bug.yml',
+      href: 'https://github.com/CyberDrain/CIPP/issues/new?template=bug.yml',
       onClick: () =>
-        window.open('https://github.com/KelvinTegelaar/CIPP/issues/new?template=bug.yml', '_blank'),
+        window.open('https://github.com/CyberDrain/CIPP/issues/new?template=bug.yml', '_blank'),
     },
     {
       id: 'feature-request',
       icon: <FeedbackIcon />,
       name: 'Request Feature',
-      href: 'https://github.com/KelvinTegelaar/CIPP/issues/new?template=feature.yml',
+      href: 'https://github.com/CyberDrain/CIPP/issues/new?template=feature.yml',
       onClick: () =>
         window.open(
-          'https://github.com/KelvinTegelaar/CIPP/issues/new?template=feature.yml',
+          'https://github.com/CyberDrain/CIPP/issues/new?template=feature.yml',
           '_blank'
         ),
     },
     {
       id: 'discord',
-      icon: (
-        <SvgIcon
-          component={discordIcon}
-          viewBox="0 0 127.14 96.36"
-          sx={{ fontSize: '1.5rem' }}
-        ></SvgIcon>
-      ),
+      icon: <img src="/discord-mark-blue.svg" alt="Discord" style={{ width: 24, height: 24 }} />,
       name: 'Join the Discord!',
       href: 'https://discord.gg/cyberdrain',
       onClick: () => window.open('https://discord.gg/cyberdrain', '_blank'),
@@ -243,6 +258,12 @@ const App = (props) => {
       name: 'Check the Documentation',
       href: `https://docs.cipp.app/user-documentation${pathname}`,
       onClick: () => window.open(`https://docs.cipp.app/user-documentation${pathname}`, '_blank'),
+    },
+    {
+      id: 'tutorials',
+      icon: <TutorialIcon />,
+      name: 'Tutorials',
+      onClick: () => setTutorialDialogOpen(true),
     },
   ]
 
@@ -276,9 +297,15 @@ const App = (props) => {
                           <CssBaseline />
                           <ErrorBoundary FallbackComponent={Error500}>
                             <PrivateRoute>
-                              <ReleaseNotesProvider>
-                                {getLayout(<Component {...pageProps} />)}
-                              </ReleaseNotesProvider>
+                              <TutorialProvider>
+                                <ReleaseNotesProvider>
+                                  {getLayout(<Component {...pageProps} />)}
+                                </ReleaseNotesProvider>
+                                <CippTutorialDialog
+                                  open={tutorialDialogOpen}
+                                  onClose={() => setTutorialDialogOpen(false)}
+                                />
+                              </TutorialProvider>
                             </PrivateRoute>
                           </ErrorBoundary>
                           <Toaster position="top-center" />
